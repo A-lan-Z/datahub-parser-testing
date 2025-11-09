@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.datahub.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(chmod:*)",
+      "Bash(python -c:*)",
+      "Bash(python3:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

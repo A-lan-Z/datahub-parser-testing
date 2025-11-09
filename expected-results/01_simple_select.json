@@ -1,0 +1,7 @@
+{
+  "in_tables": [
+    "urn:li:dataset:(urn:li:dataPlatform:teradata,SampleDB.Analytics.customers,PROD)"
+  ],
+  "out_tables": [],
+  "column_lineage": []
+}
