@@ -542,8 +542,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not (args.sql_file or args.sql_dir or args.csv_spec):
-        parser.error("Provide at least one --sql-file/--sql-dir/--csv-spec input.")
+    if not (args.sql_file or args.sql_dir or args.csv_spec or args.csv_dir):
+        parser.error("Provide at least one --sql-file/--sql-dir/--csv-spec/--csv-dir input.")
 
     if args.csv_dir and not args.csv_dir_column:
         parser.error("--csv-dir-column is required when using --csv-dir.")
