@@ -72,7 +72,7 @@ test-queries/teradata/
 
 ### Test Categories
 
-#### 01-basic (10 queries)
+#### 01-basic
 Tests fundamental SQL operations to establish baseline parser capabilities:
 - Simple SELECT with explicit columns
 - SELECT * (requires schema registration)
@@ -86,7 +86,7 @@ Tests fundamental SQL operations to establish baseline parser capabilities:
 
 **Expected Success Rate:** 95%+
 
-#### 02-ctes (5 queries)
+#### 02-ctes
 Tests Common Table Expression support at various complexity levels:
 - Single CTE
 - Multiple dependent CTEs
@@ -96,7 +96,7 @@ Tests Common Table Expression support at various complexity levels:
 
 **Expected Success Rate:** 90%+
 
-#### 03-subqueries (6 queries)
+#### 03-subqueries
 Tests subquery handling in various contexts:
 - Scalar subqueries in SELECT
 - Subqueries in WHERE (IN, comparison)
@@ -107,7 +107,7 @@ Tests subquery handling in various contexts:
 
 **Expected Success Rate:** 85%+
 
-#### 04-advanced-dml (6 queries)
+#### 04-advanced-dml
 Tests advanced SQL features:
 - MERGE statements (table-level lineage only)
 - Window functions (ROW_NUMBER, RANK, LAG, LEAD)

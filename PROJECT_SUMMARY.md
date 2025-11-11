@@ -23,25 +23,7 @@ This testing framework provides comprehensive tools for evaluating the DataHub S
 - Performance profiling with millisecond precision
 - Handles multi-statement SQL files
 
-### 2. Test Suite (27 Sample Queries)
-
-**Categories:**
-- **01-basic** (10 queries): SELECT, INSERT, JOIN, CTAS, VIEW, UNION, UPDATE, DELETE
-- **02-ctes** (5 queries): Single, multiple, nested, recursive CTEs
-- **03-subqueries** (6 queries): Scalar, correlated, nested, EXISTS
-- **04-advanced-dml** (6 queries): MERGE, window functions, CASE, QUALIFY, PIVOT
-
-**Coverage:**
-- Fundamental SQL operations
-- Progressive complexity levels
-- Teradata-specific syntax (QUALIFY clause)
-- Known parser limitations (INSERT column mismatch, MERGE)
-- Real-world patterns
-
-**Extensible Structure:**
-- Easy to add new test categories
-- Organized by complexity and feature
-- Supports multi-dialect testing
+### 2. Test Suite 
 
 ### 3. Results Analysis Script (`analyze_results.py`)
 
