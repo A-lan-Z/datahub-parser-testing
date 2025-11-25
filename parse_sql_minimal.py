@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from datahub.ingestion.graph.client import DataHubGraph, DatahubClientConfig
 
-from emit_lineage import LineageEmitter
+from emit_lineage import LineageEmitter, LineageTaskContext
 from report_utils import (
     build_debug_error_summary,
     compute_overview,
@@ -540,6 +540,38 @@ def main() -> None:
         action="store_true",
         help="If set, emit the parsed lineage to DataHub using lineage utilities.",
     )
+    parser.add_argument(
+        "--dataflow-orchestrator",
+        default=os.getenv("DATAHUB_DATAFLOW_ORCHESTRATOR", "sqlparser"),
+        help=(
+            "Logical orchestrator used when constructing DataFlow URNs "
+            "(default: %(default)s or DATAHUB_DATAFLOW_ORCHESTRATOR)."
+        ),
+    )
+    parser.add_argument(
+        "--dataflow-cluster",
+        default=os.getenv("DATAHUB_DATAFLOW_CLUSTER"),
+        help=(
+            "Cluster/environment component for DataFlow URNs. "
+            "Defaults to --env if unspecified."
+        ),
+    )
+    parser.add_argument(
+        "--dataflow-prefix",
+        default=os.getenv("DATAHUB_DATAFLOW_PREFIX"),
+        help=(
+            "Optional prefix added to derived DataFlow IDs (default: %(default)s or "
+            "DATAHUB_DATAFLOW_PREFIX)."
+        ),
+    )
+    parser.add_argument(
+        "--datajob-type",
+        default=os.getenv("DATAHUB_DATAJOB_TYPE", "SQL_PARSER"),
+        help=(
+            "Value recorded in dataJobInfo.type for emitted jobs "
+            "(default: %(default)s or DATAHUB_DATAJOB_TYPE)."
+        ),
+    )
     args = parser.parse_args()
 
     if not (args.sql_file or args.sql_dir or args.csv_spec or args.csv_dir):
@@ -570,7 +602,17 @@ def main() -> None:
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     graph = DataHubGraph(DatahubClientConfig(server=args.server, token=TOKEN))
-    emitter: Optional[LineageEmitter] = LineageEmitter(graph) if args.emit_lineage else None
+    emitter: Optional[LineageEmitter] = None
+    if args.emit_lineage:
+        dataflow_cluster = args.dataflow_cluster or args.env
+        emitter = LineageEmitter(
+            graph,
+            orchestrator=args.dataflow_orchestrator,
+            cluster=dataflow_cluster,
+            env=args.env,
+            job_type=args.datajob_type,
+            flow_id_prefix=args.dataflow_prefix,
+        )
 
     outcomes: List[QueryOutcome] = []
 
@@ -617,7 +659,15 @@ def main() -> None:
             )
             outcomes.append(outcome)
             if emitter:
-                emitter.collect(result)
+                emitter.collect(
+                    LineageTaskContext(
+                        identifier=task.identifier,
+                        context_label=task.context,
+                        source_path=task.source_path,
+                        query_text=task.query_text,
+                    ),
+                    result,
+                )
         except Exception as exc:  # pragma: no cover - network failure
             elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
             payload = {"error": str(exc), "query": task.query_text}

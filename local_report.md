@@ -13,6 +13,12 @@
 - `Parser` vs `Fallback`: whether the parser supplied the statement type or the regex fallback classifier did.
 - Flags: `ERR`=parser/RPC error, `GAP`=missing upstream or downstream lineage, `LIN`=complete table lineage, `SELF`=self-referential lineage, `COL`=column-level lineage detected.
 
+## DataFlow-Backed Emission
+
+- Lineage emission now builds DataFlow/DataJob entities per [DataFlow](https://docs.datahub.com/docs/generated/metamodel/entities/dataflow) and [DataFlow & DataJob tutorials](https://docs.datahub.com/docs/api/tutorials/dataflow-datajob), so every SQL source path becomes its own flow and each statement becomes a job beneath it.
+- The new CLI flags `--dataflow-orchestrator`, `--dataflow-cluster`, `--dataflow-prefix`, and `--datajob-type` control the URNs and job metadata that are created before pushing `dataJobInfo` + `dataJobInputOutput` aspects.
+- Column-level lineage is attached through each job's `fineGrainedLineages`, while dataset scaffolds are still created automatically when missing so downstream DataJob references resolve cleanly.
+
 ## Statement Type Overview
 
 _How many statements of each type we parsed, whether they succeeded, and how long they took._

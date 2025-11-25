@@ -1,24 +1,31 @@
 from __future__ import annotations
 
-import inspect
+import hashlib
 import json
+import re
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Set
 
-from datahub.emitter.mce_builder import dataset_urn_to_key, make_schema_field_urn
+from datahub.emitter.mce_builder import (
+    dataset_urn_to_key,
+    make_data_flow_urn,
+    make_data_job_urn_with_flow,
+    make_schema_field_urn,
+)
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.graph.client import DataHubGraph
-from datahub.metadata.com.linkedin.pegasus2avro.dataset import (
-    DatasetLineageType,
-    FineGrainedLineage,
-    FineGrainedLineageDownstreamType,
-    FineGrainedLineageUpstreamType,
-    Upstream,
-    UpstreamLineage,
-)
 from datahub.metadata.schema_classes import (
+    DataFlowInfoClass,
+    DataJobInfoClass,
+    DataJobInputOutputClass,
     DatasetPropertiesClass,
+    EdgeClass,
+    FineGrainedLineageClass,
+    FineGrainedLineageDownstreamTypeClass,
+    FineGrainedLineageUpstreamTypeClass,
     OtherSchemaClass,
     SchemaFieldClass,
     SchemaFieldDataTypeClass,
@@ -26,15 +33,65 @@ from datahub.metadata.schema_classes import (
     StringTypeClass,
 )
 
-_UPSTREAM_LINEAGE_SUPPORTS_CONFIDENCE = (
-    "confidenceScore" in inspect.signature(UpstreamLineage).parameters
-)
+
+@dataclass(frozen=True)
+class LineageTaskContext:
+    identifier: str
+    context_label: str
+    source_path: Path
+    query_text: str
+
+    def preview(self, max_chars: int = 240) -> str:
+        stripped_lines = [line.strip() for line in self.query_text.splitlines()]
+        condensed = " ".join(line for line in stripped_lines if line)
+        if not condensed:
+            condensed = "<empty>"
+        if len(condensed) <= max_chars:
+            return condensed
+        return f"{condensed[: max_chars - 1]}…"
+
+    @property
+    def source_label(self) -> str:
+        return str(self.source_path)
+
+
+def _sanitize_identifier(value: str, *, fallback: str, max_length: int = 200) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.:/\\-]+", "_", value.strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned:
+        cleaned = fallback
+    if len(cleaned) <= max_length:
+        return cleaned.lower()
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
+    prefix = cleaned[: max_length - len(digest) - 1]
+    return f"{prefix}_{digest}".lower()
+
+
+def _relative_source_label(path: Path) -> str:
+    try:
+        relative = path.relative_to(Path.cwd())
+        if str(relative):
+            return relative.as_posix()
+    except ValueError:
+        pass
+    return path.as_posix()
+
+
+def _truncate_for_property(text: str, limit: int = 280) -> str:
+    sanitized = re.sub(r"\s+", " ", text.strip())
+    if not sanitized:
+        return ""
+    if len(sanitized) <= limit:
+        return sanitized
+    return f"{sanitized[: limit - 1]}…"
 
 
 def _build_fine_grained_lineage(
-    downstream_dataset: str, column_lineage: Optional[Iterable[Any]]
-) -> List[FineGrainedLineage]:
-    fine_grained: List[FineGrainedLineage] = []
+    downstream_dataset: str,
+    column_lineage: Optional[Iterable[Any]],
+    confidence: Optional[float],
+) -> List[FineGrainedLineageClass]:
+    fine_grained: List[FineGrainedLineageClass] = []
     if not column_lineage:
         return fine_grained
 
@@ -51,7 +108,7 @@ def _build_fine_grained_lineage(
             continue
         downstream_field = make_schema_field_urn(downstream_dataset, downstream_column)
 
-        upstream_fields = []
+        upstream_fields: List[str] = []
         for upstream in getattr(entry, "upstreams", []):
             upstream_dataset = getattr(upstream, "table", None)
             upstream_column = getattr(upstream, "column", None)
@@ -65,68 +122,21 @@ def _build_fine_grained_lineage(
         if not upstream_fields:
             continue
 
-        fine_grained.append(
-            FineGrainedLineage(
-                upstreamType=FineGrainedLineageUpstreamType.FIELD_SET,
-                upstreams=upstream_fields,
-                downstreamType=FineGrainedLineageDownstreamType.FIELD,
-                downstreams=[downstream_field],
-            )
-        )
+        lineage_kwargs: Dict[str, Any] = {
+            "upstreamType": FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+            "upstreams": upstream_fields,
+            "downstreamType": FineGrainedLineageDownstreamTypeClass.FIELD,
+            "downstreams": [downstream_field],
+        }
+        if confidence:
+            lineage_kwargs["confidenceScore"] = confidence
+        logic = getattr(entry, "logic", None)
+        logic_text = getattr(logic, "column_logic", None)
+        if logic_text:
+            lineage_kwargs["transformOperation"] = logic_text
+        fine_grained.append(FineGrainedLineageClass(**lineage_kwargs))
 
     return fine_grained
-
-
-def _build_upstream_lineage_aspect(
-    upstream_datasets: Iterable[str],
-    confidence: float,
-    *,
-    fine_grained: Optional[List[FineGrainedLineage]] = None,
-) -> UpstreamLineage:
-    upstreams = [
-        Upstream(dataset=dataset, type=DatasetLineageType.TRANSFORMED)
-        for dataset in upstream_datasets
-        if dataset
-    ]
-
-    kwargs: Dict[str, Any] = {"upstreams": upstreams}
-    if fine_grained:
-        kwargs["fineGrainedLineages"] = fine_grained
-    if _UPSTREAM_LINEAGE_SUPPORTS_CONFIDENCE and confidence > 0:
-        kwargs["confidenceScore"] = confidence
-
-    return UpstreamLineage(**kwargs)
-
-
-def _generate_lineage_mcps(result: Any) -> List[MetadataChangeProposalWrapper]:
-    downstream_tables = getattr(result, "out_tables", None) or []
-    if not downstream_tables:
-        return []
-
-    upstream_tables = getattr(result, "in_tables", None) or []
-    column_lineage = getattr(result, "column_lineage", None)
-    confidence = getattr(getattr(result, "debug_info", None), "confidence", 0.0)
-
-    mcps: List[MetadataChangeProposalWrapper] = []
-    for downstream_dataset in downstream_tables:
-        fine_grained = _build_fine_grained_lineage(downstream_dataset, column_lineage)
-        filtered_upstreams = [
-            dataset for dataset in upstream_tables if dataset and dataset != downstream_dataset
-        ]
-        if not filtered_upstreams and not fine_grained:
-            continue
-        aspect = _build_upstream_lineage_aspect(
-            filtered_upstreams,
-            confidence,
-            fine_grained=fine_grained or None,
-        )
-        mcps.append(
-            MetadataChangeProposalWrapper(
-                entityUrn=downstream_dataset,
-                aspect=aspect,
-            )
-        )
-    return mcps
 
 
 def _accumulate_dataset_columns(
@@ -239,12 +249,28 @@ def _ensure_datasets_exist(
 
 
 class LineageEmitter:
-    def __init__(self, graph: DataHubGraph):
+    def __init__(
+        self,
+        graph: DataHubGraph,
+        *,
+        orchestrator: str,
+        cluster: str,
+        env: str,
+        job_type: str = "SQL_PARSER",
+        flow_id_prefix: Optional[str] = None,
+    ):
         self.graph = graph
+        self.orchestrator = orchestrator
+        self.cluster = cluster
+        self.env = env
+        self.job_type = job_type
+        self.flow_id_prefix = flow_id_prefix or ""
         self.dataset_columns: DefaultDict[str, Set[str]] = defaultdict(set)
-        self.mcps_to_emit: List[MetadataChangeProposalWrapper] = []
+        self._flow_cache: Dict[Path, str] = {}
+        self.flow_mcps: Dict[str, MetadataChangeProposalWrapper] = {}
+        self.job_mcps: List[MetadataChangeProposalWrapper] = []
 
-    def collect(self, result: Any) -> None:
+    def collect(self, context: LineageTaskContext, result: Any) -> None:
         upstream_tables = getattr(result, "in_tables", None) or []
         downstream_tables = getattr(result, "out_tables", None) or []
         column_lineage = getattr(result, "column_lineage", None)
@@ -254,18 +280,40 @@ class LineageEmitter:
             downstream_tables,
             column_lineage,
         )
-        self.mcps_to_emit.extend(_generate_lineage_mcps(result))
+        if not downstream_tables:
+            return
+
+        flow_urn = self._ensure_flow(context)
+        job_urn = self._build_job_urn(flow_urn, context)
+        self.job_mcps.append(
+            MetadataChangeProposalWrapper(
+                entityUrn=job_urn,
+                aspect=self._build_job_info_aspect(flow_urn, context, result),
+            )
+        )
+        self.job_mcps.append(
+            MetadataChangeProposalWrapper(
+                entityUrn=job_urn,
+                aspect=self._build_job_lineage_aspect(
+                    upstream_tables,
+                    downstream_tables,
+                    column_lineage,
+                    result,
+                ),
+            )
+        )
 
     def emit(self) -> None:
-        if not self.mcps_to_emit:
+        if not self.job_mcps:
             print("[emit] No lineage to emit (no downstream datasets identified).")
             return
 
         if self.dataset_columns:
             _ensure_datasets_exist(self.graph, self.dataset_columns)
 
-        print("[emit] Lineage MCPs to be sent:")
-        for mcp in self.mcps_to_emit:
+        mcps_to_send = list(self.flow_mcps.values()) + self.job_mcps
+        print("[emit] DataFlow/DataJob MCPs to be sent:")
+        for mcp in mcps_to_send:
             try:
                 payload = mcp.to_obj(simplified_structure=True)
             except Exception:
@@ -273,12 +321,110 @@ class LineageEmitter:
             print(json.dumps(payload, indent=2))
 
         try:
-            self.graph.emit_mcps(self.mcps_to_emit)
-            emitted_datasets = sorted(
-                {mcp.entityUrn for mcp in self.mcps_to_emit if mcp.entityUrn}
+            self.graph.emit_mcps(mcps_to_send)
+            emitted_entities = sorted(
+                {mcp.entityUrn for mcp in mcps_to_send if mcp.entityUrn}
             )
-            print("[emit] Lineage emitted for:")
-            for dataset in emitted_datasets:
-                print(f"  - {dataset}")
-        except Exception as exc:
+            print("[emit] Lineage emitted for entities:")
+            for entity in emitted_entities:
+                print(f"  - {entity}")
+        except Exception as exc:  # pragma: no cover - network failure
             print(f"[emit] Failed to emit lineage: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+
+    def _ensure_flow(self, context: LineageTaskContext) -> str:
+        source_path = context.source_path
+        if source_path in self._flow_cache:
+            return self._flow_cache[source_path]
+
+        source_label = _relative_source_label(source_path)
+        base_id = f"{self.flow_id_prefix}__{source_label}" if self.flow_id_prefix else source_label
+        flow_id = _sanitize_identifier(base_id, fallback="sql_parser_flow")
+        flow_name = source_path.name or flow_id
+        flow_urn = make_data_flow_urn(self.orchestrator, flow_id, self.cluster)
+        description = (
+            f"SQL lineage extracted from {source_label}"
+            if source_label
+            else "SQL lineage extracted by parse_sql_minimal.py"
+        )
+        custom_props = {
+            "sqlParserSourcePath": context.source_label,
+            "sqlParserFlowId": flow_id,
+        }
+        if self.flow_id_prefix:
+            custom_props["sqlParserFlowPrefix"] = self.flow_id_prefix
+        flow_mcp = MetadataChangeProposalWrapper(
+            entityUrn=flow_urn,
+            aspect=DataFlowInfoClass(
+                name=flow_name,
+                description=description,
+                project=str(source_path.parent),
+                customProperties=custom_props,
+                env=self.env,
+            ),
+        )
+        self.flow_mcps[flow_urn] = flow_mcp
+        self._flow_cache[source_path] = flow_urn
+        return flow_urn
+
+    def _build_job_urn(self, flow_urn: str, context: LineageTaskContext) -> str:
+        job_id = _sanitize_identifier(context.identifier, fallback="sql_parser_job")
+        return make_data_job_urn_with_flow(flow_urn, job_id)
+
+    def _build_job_info_aspect(
+        self, flow_urn: str, context: LineageTaskContext, result: Any
+    ) -> DataJobInfoClass:
+        description = _truncate_for_property(context.context_label, 512)
+        preview = context.preview()
+        custom_props: Dict[str, str] = {
+            "sqlParserQueryIdentifier": context.identifier,
+            "sqlParserSource": context.source_label,
+            "sqlParserQueryPreview": preview,
+        }
+        fingerprint = getattr(result, "query_fingerprint", None)
+        if fingerprint:
+            custom_props["sqlParserQueryFingerprint"] = fingerprint
+        parser_type = getattr(result, "query_type", None)
+        if parser_type:
+            custom_props["sqlParserQueryType"] = str(parser_type)
+        confidence = getattr(getattr(result, "debug_info", None), "confidence", None)
+        if confidence is not None:
+            custom_props["sqlParserConfidence"] = f"{confidence:.6f}"
+        return DataJobInfoClass(
+            name=context.identifier,
+            type=self.job_type,
+            description=description or preview,
+            flowUrn=flow_urn,
+            customProperties=custom_props,
+            env=self.env,
+        )
+
+    def _build_job_lineage_aspect(
+        self,
+        upstream_tables: Iterable[str],
+        downstream_tables: Iterable[str],
+        column_lineage: Optional[Iterable[Any]],
+        result: Any,
+    ) -> DataJobInputOutputClass:
+        upstreams = [dataset for dataset in upstream_tables if dataset]
+        downstreams = [dataset for dataset in downstream_tables if dataset]
+        confidence = getattr(getattr(result, "debug_info", None), "confidence", None)
+        fine_grained: List[FineGrainedLineageClass] = []
+        for downstream_dataset in downstreams:
+            fine_grained.extend(
+                _build_fine_grained_lineage(
+                    downstream_dataset,
+                    column_lineage,
+                    confidence=confidence,
+                )
+            )
+
+        return DataJobInputOutputClass(
+            inputDatasets=upstreams,
+            outputDatasets=downstreams,
+            inputDatasetEdges=[EdgeClass(destinationUrn=urn) for urn in upstreams],
+            outputDatasetEdges=[EdgeClass(destinationUrn=urn) for urn in downstreams],
+            fineGrainedLineages=fine_grained or None,
+        )
