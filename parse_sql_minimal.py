@@ -24,7 +24,7 @@ from report_utils import (
     render_report_markdown,
 )
 
-TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhY3RvclR5cGUiOiJVU0VSIiwiYWN0b3JJZCI6ImRhdGFodWIiLCJ0eXBlIjoiUEVSU09OQUwiLCJ2ZXJzaW9uIjoiMiIsImp0aSI6IjI1OGRjMWNmLWYwNTItNDlmZS05M2YxLWFlNDc2NTdlZTNkNiIsInN1YiI6ImRhdGFodWIiLCJleHAiOjE3NTQ0MTczMjIsImlzcyI6ImRhdGFodWItbWV0YWRhdGEtc2VydmljZSJ9.qc3sjJamZBlOEQzlogyq20MnXrqP3kLsgCaAhRJ46_E"
+
 @dataclass
 class QueryTask:
     identifier: str
@@ -507,6 +507,11 @@ def main() -> None:
         help="DataHub GMS endpoint (default: %(default)s or DATAHUB_SERVER).",
     )
     parser.add_argument(
+        "--token",
+        default=os.getenv("DATAHUB_TOKEN"),
+        help="DataHub access token (default: DATAHUB_TOKEN env var).",
+    )
+    parser.add_argument(
         "--platform",
         default=os.getenv("DATAHUB_PLATFORM", "teradata"),
         help="Dataset platform (default: %(default)s or DATAHUB_PLATFORM).",
@@ -601,7 +606,7 @@ def main() -> None:
     raw_dir = Path(args.raw_output_dir or (Path("lineage_outputs") / timestamp))
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    graph = DataHubGraph(DatahubClientConfig(server=args.server, token=TOKEN))
+    graph = DataHubGraph(DatahubClientConfig(server=args.server, token=args.token))
     emitter: Optional[LineageEmitter] = None
     if args.emit_lineage:
         dataflow_cluster = args.dataflow_cluster or args.env
