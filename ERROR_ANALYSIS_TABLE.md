@@ -32,13 +32,15 @@
 ### 1. Column Lineage Limitation
 *   **Error Pattern:** `Can only generate column-level lineage for select-like inner statements, not <class 'sqlglot.expressions.[Type]'>`
 *   **Root Cause:** DataHub's column-level lineage extraction requires SQL statements that explicitly read source columns and project destination columns. This error is raised for statement types that do not support this paradigm.
-*   **Technical Explanation:** The `_prepare_query_columns()` function attempts to extract a `SELECT` statement from the parsed Abstract Syntax Tree (AST). This operation is invalid for:
+*   **Error Source:** This is a **DataHub validation error** (raised during lineage analysis), not a SQLglot parsing error. The underlying parser successfully parses the SQL; DataHub's lineage layer cannot extract column-level lineage from certain statement types.
+*   **Technical Explanation:** DataHub's `_column_level_lineage()` function attempts to extract a `SELECT` statement from the parsed Abstract Syntax Tree (AST). This operation is invalid for:
     *   **DDL Operations:** Statements that define structure rather than move data (e.g., `CREATE TABLE` without `AS SELECT`, `DROP`, `ALTER`, `TRUNCATE`).
     *   **Session/Control Statements:** Metadata operations such as `USE`, `SET`, or `COMMIT`/`ROLLBACK`.
-    *   **Delete Operations:** `DELETE` statements remove data and do not produce output columns.
+    *   **Delete Operations:** `DELETE` statements remove data and do not produce output columns. Note: Table-level lineage showing the deleted-from table is still generated, but column-level lineage is not possible.
     *   **Insert Literals:** `INSERT INTO ... VALUES` statements often lack source column references.
     *   **Locking Statements:** `LOCKING TABLE` statements used solely for concurrency control.
-*   **Supported Statements:** `SELECT`, `INSERT INTO ... SELECT`, `CREATE TABLE AS SELECT`, `UPDATE ... FROM`, `MERGE`, and CTEs.
+*   **Supported Statements:** `SELECT`, `INSERT INTO ... SELECT`, `CREATE TABLE AS SELECT`, `UPDATE ... FROM`, and CTEs.
+*   **Note:** While `MERGE` statements are recognized by the parser, DataHub **does not generate column-level lineage** for MERGE INTO statements. Table-level lineage only.
 
 ### 2. Teradata USING Clause
 *   **Error Pattern:** `Invalid expression / Unexpected token. Line 1, Col: 5. USING [parameter_declarations] [SQL_statement]`
@@ -68,8 +70,9 @@
 
 ### 6. Teradata NAMED Keyword
 *   **Error Pattern:** `Expecting ). Line 1, Col: [X]. [context] (NAMED alias) [more context]`
-*   **Root Cause:** The query uses the Teradata-specific `(NAMED alias)` syntax for column aliasing, which differs from the standard `AS alias`.
+*   **Root Cause:** The query uses the Teradata-specific `(NAMED alias)` syntax for column aliasing or character set conversion, which differs from the standard `AS alias`.
 *   **Technical Explanation:** The parser interprets the parentheses following a column reference as the start of a function call. When it encounters the `NAMED` keyword instead of a valid function argument, it raises a syntax error expecting a closing parenthesis.
+*   **Note:** Support for the NAMED keyword has been added to SQLglot (as of Issue #4380) for Teradata character set conversion syntax (e.g., `CONVERT(expr USING charset)`). However, older versions or specific usage patterns may still trigger this error.
 
 ### 7. Teradata REPLACE PROCEDURE
 *   **Error Pattern:** `Required keyword: 'definer' missing for <class 'sqlglot.expressions.SqlSecurityProperty'>... SQL SECURITY OWNER`
@@ -81,25 +84,67 @@
 *   **Root Cause:** The statement type (e.g., `ALTER PROCEDURE`, `CREATE DATABASE`) is recognized, but specific dialect options or directives are not supported.
 *   **Technical Explanation:** This distinction differs from a "Syntax Error." The parser correctly identifies the high-level statement but fails to parse specific clauses, such as `COMPILE` directives in `ALTER PROCEDURE` or storage options in `CREATE DATABASE`. These are administrative commands and do not impact data lineage.
 
-### 9. Duplicate Alias
-*   **Error Pattern:** `sqlglot failed to map columns to their source tables... Alias already used: [alias]`
-*   **Root Cause:** The query reuses the same table alias multiple times within the same scope, creating ambiguity for column resolution.
-*   **Technical Explanation:** The scope builder maintains a symbol table mapping aliases to tables. When a duplicate alias is registered (e.g., in self-joins or nested subqueries without unique aliasing), the parser cannot deterministically resolve column references to their source, resulting in a semantic error.
+### 9. Duplicate Alias / Column Mapping Failures
+*   **Error Pattern:** `sqlglot failed to map columns to their source tables; likely missing/outdated table definitions` or `Alias already used: [alias]`
+*   **Root Cause:** The scope builder cannot establish complete column-to-table mappings due to either duplicate aliases, complex subqueries, or missing schema information.
+*   **Technical Explanation:** The scope builder maintains a symbol table mapping aliases to tables and columns to their sources. When this mapping fails—whether due to duplicate aliases, complex nested subqueries, or missing schema metadata—the parser cannot deterministically resolve column references, resulting in a semantic error.
+*   **Example from Real Data:**
+    ```sql
+    UPDATE source_table st
+    FROM source_table st
+    SET field1 = (SELECT date_col AS date_alias FROM temp_table WHERE condition = true)
+    WHERE st.id > 0
+    ```
+    *Error Message:* `sqlglot failed to map columns to their source tables; likely missing/outdated table definitions`
+    *Note:* The UPDATE statement with a complex nested subquery in the SET clause makes it difficult for the scope builder to establish unambiguous column mappings, particularly because the subquery's output columns (date_alias) don't clearly map to the target table's columns.
 
 ### 10. Schema Nesting Level
 *   **Error Pattern:** `Table [name] must match the schema's nesting level: 3.`
 *   **Root Cause:** The table reference provided has only 2 levels (e.g., `database.table`), but the system configuration requires fully qualified names with 3 levels (e.g., `catalog.database.table`).
-*   **Technical Explanation:** DataHub enforces a standard 3-level naming convention for cross-platform consistency. Teradata queries often use a 2-level format (`database.table`). This error indicates a need for a default catalog/database configuration to normalize these references.
+*   **Technical Explanation:** DataHub enforces a standard 3-level naming convention for cross-platform consistency. Teradata queries often use a 2-level format (`database.table`). This error is triggered specifically when **CREATE VIEW or CREATE TABLE statements** define output objects with 2-level names. Unlike SELECT queries where output validation may be deferred, DDL statements immediately validate the fully qualified name of the persistent object being created.
+*   **Example from Real Data:**
+    ```sql
+    CREATE VIEW db_alias.view_name AS
+    SELECT col_a, col_b, col_c
+    FROM source_db.table_source s1
+    JOIN source_db.table_history s2
+        ON s1.id = s2.id
+    ```
+    *Error Message:* `Table db_alias.view_name must match the schema's nesting level: 3`
+    *Note:* The CREATE VIEW statement defines an output with 2-level qualification. The parser validates this immediately and requires 3-level naming (e.g., `catalog.db_alias.view_name`).
+*   **Resolution:** Either specify a 3-level name in the CREATE VIEW/TABLE statement or configure `--default-catalog` parameter to auto-expand 2-level names.
 
 ### 11. Expression Type Mismatch
 *   **Error Pattern:** `* is not <class 'sqlglot.expressions.Alias'>.`
 *   **Root Cause:** The lineage analyzer expects all expressions in the projection list to be `Alias` nodes, but encounters an unexpanded wildcard (`*`).
 *   **Technical Explanation:** Typically, `*` is expanded into individual columns during the optimization phase. In complex queries involving nested subqueries, unions, or joins where schema information is missing or ambiguous, this expansion may fail. The lineage analyzer then encounters a raw `Star` node instead of an `Alias`, causing a type check failure.
+*   **Example from Real Data:**
+    ```sql
+    SELECT *
+    FROM source_schema.error_tracking_table
+    ORDER BY 1
+    ```
+    *Error Message:* `* is not <class 'sqlglot.expressions.Alias'>`
+    *Note:* The parser cannot expand the wildcard into individual columns, possibly due to missing schema metadata for the source table. This prevents column-level lineage extraction.
+*   **Resolution:** Either specify explicit columns (`SELECT col_a, col_b, col_c`) or ensure the source table schema is registered in DataHub metadata.
 
 ### 12. Syntax Error (Parentheses)
 *   **Error Pattern:** `Expecting ). Line [X], Col: [Y].`
 *   **Root Cause:** The SQL query contains unbalanced parentheses.
 *   **Technical Explanation:** This is a standard syntax error. It typically occurs in deeply nested function calls, complex `CASE` expressions, or subqueries where a closing parenthesis is missing or misplaced.
+*   **Example from Real Data:**
+    ```sql
+    UPDATE query_log
+    SET duration_field = CASE WHEN first_timestamp
+                        THEN 0 ELSE (EXTRACT(DAY FROM (first_timestamp - start_timestamp DAY TO SECOND))*86400
+                        + EXTRACT(HOUR FROM (first_timestamp - start_timestamp))*3600
+                        + EXTRACT(MINUTE FROM (first_timestamp - start_timestamp DAY TO SECOND))*60
+                        + EXTRACT(SECOND FROM (first_timestamp - start_timestamp DAY TO SECOND))
+                        END
+    WHERE first_timestamp > ? AND first_timestamp < ?
+    ```
+    *Error Message:* `Expecting ) Line 3, Col: 18`
+    *Note:* The CASE expression contains unbalanced parentheses in the EXTRACT function calls and condition evaluation. Line breaks and escape sequences may obscure the actual syntax structure.
 
 ### 13. Invalid Teradata Syntax
 *   **Error Pattern:** `Invalid expression / Unexpected token... SELECT SESSION`
