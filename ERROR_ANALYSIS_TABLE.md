@@ -1,14 +1,12 @@
 # Error Analysis Report
 
-**Purpose:** This document provides a detailed analysis of parser errors encountered during the processing of SQL statements. It maps unique error types to their root causes and offers technical explanations to guide resolution efforts.
+**Purpose:** This document provides a detailed analysis of parser errors encountered during the processing of SQL statements. It maps unique error types to their root causes.
 
 **Date:** November 26, 2025
 
 ---
 
-## 1. Executive Summary
-
-The following table provides a high-level overview of the identified error categories. Detailed analysis for each category follows in Section 2.
+## 1. Summary
 
 | ID | Error Category | Error Pattern Summary | Count |
 |:---|:---|:---|:---|
@@ -126,19 +124,3 @@ The following table provides a high-level overview of the identified error categ
 | **System Limits** | Insert Values scope, Wildcard expansion | 31 | 6.3% |
 | **Unsupported DDL** | `ALTER PROCEDURE`, `CREATE DATABASE`, `CREATE USER` | 24 | 4.9% |
 | **Total** | | **490** | **100%** |
-
----
-
-## 4. Recommendations
-
-### 4.1. Strategic Actions
-1.  **Filter Expected Errors:** Explicitly exclude "Column Lineage Limitation" errors from failure reports, as these are design constraints, not bugs.
-2.  **Pre-Processing Pipeline:** Implement a text-processing layer to standardize Teradata SQL before parsing. This should handle:
-    *   Removal of `USING` clauses.
-    *   Removal of `LOCKING` clauses.
-    *   Expansion of `CT` to `CREATE TABLE`.
-    *   Standardization of `(NAMED alias)` to `AS alias`.
-3.  **Configuration Updates:** Ensure the parser configuration includes `default_db` and `default_schema` parameters to resolve nesting level errors.
-
-### 4.2. Reporting Improvements
-*   Implement granular error categorization to automatically classify errors into "Actionable," "Expected," or "Dialect-Unsupported" buckets.
